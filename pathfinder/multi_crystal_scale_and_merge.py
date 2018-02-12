@@ -65,54 +65,8 @@ def run():
 
   reflections = reflections[0]
 
-  data_manager = DataManager(experiments, reflections)
-
-  experiments = data_manager.experiments
-  reflections = data_manager.reflections
-
-  # export reflections
-  hklin = data_manager.export_mtz(filename='combined.mtz')
-
-  # decide pointgroup
-  hklout = 'sorted.mtz'
-  pointgroup, reindex_op = decide_pointgroup(hklin, hklout)
-  print pointgroup.info(), reindex_op
-
-  # reindex to correct bravais setting
-  data_manager.reindex(reindex_op, pointgroup)
-  reindexed_expts = 'experiments_reindexed.json'
-  reindexed_refl = 'reflections_reindexed.pickle'
-  data_manager.export_experiments(reindexed_expts)
-  data_manager.export_reflections(reindexed_refl)
-
-  # refine in correct bravais setting
-  refined_expts, refined_refl = refine(
-    reindexed_expts, reindexed_refl)
-  data_manager.experiments = load.experiment_list(
-    refined_expts, check_format=False)
-  data_manager.reflections = flex.reflection_table.from_pickle(refined_refl)
-
-  #export_mtz(data_manager.experiments, data_manager.reflections)
-  hklin = data_manager.export_mtz(filename='combined.mtz')
-
-  # re-run pointless using above refined reflections
-  hklout = 'sorted.mtz'
-  pointgroup, reindex_op = decide_pointgroup(hklin, hklout)
-  print pointgroup.info(), reindex_op
-
-  assert data_manager.experiments[0].crystal.get_space_group() == pointgroup
-  assert reindex_op.is_identity_op()
-
-  # two-theta refinement to get best estimate of unit cell
-  import xia2.Modules.Scaler.tools as tools
-  best_unit_cell, best_unit_cell_esd = two_theta_refine(
-    refined_expts, refined_refl)
-  tools.patch_mtz_unit_cell(hklout, best_unit_cell)
-
-  # scale data with aimless
-  hklin = hklout
-  hklout = 'scaled.mtz'
-  scale(hklin, hklout)
+  scaled = Scale(experiments, reflections)
+  print
 
 
 class DataManager(object):
@@ -200,64 +154,132 @@ class DataManager(object):
 
     return params.mtz.hklout
 
-def refine(experiments_filename, reflections_filename):
-  from xia2.Wrappers.Dials.Refine import Refine
-  from xia2.lib.bits import auto_logfiler
-  refiner = Refine()
-  auto_logfiler(refiner)
-  refiner.set_experiments_filename(experiments_filename)
-  refiner.set_indexed_filename(reflections_filename)
-  refiner.run()
-  return refiner.get_refined_experiments_filename(), refiner.get_refined_filename()
+class Scale(object):
+  def __init__(self, experiments, reflections):
 
-def two_theta_refine(experiments_filename, reflections_filename):
-  from xia2.Wrappers.Dials.TwoThetaRefine import TwoThetaRefine
-  from xia2.lib.bits import auto_logfiler
-  tt_refiner = TwoThetaRefine()
-  auto_logfiler(tt_refiner)
-  tt_refiner.set_experiments([experiments_filename])
-  tt_refiner.set_pickles([reflections_filename])
-  tt_refiner.run()
-  unit_cell = tt_refiner.get_unit_cell()
-  unit_cell_esd = tt_refiner.get_unit_cell_esd()
-  return unit_cell, unit_cell_esd
+    self._data_manager = DataManager(experiments, reflections)
 
-def decide_pointgroup(hklin, hklout):
-  from xia2.Wrappers.CCP4.Pointless import Pointless
-  from xia2.lib.bits import auto_logfiler
-  pointless = Pointless()
-  auto_logfiler(pointless)
-  pointless.set_hklin(hklin)
-  pointless.set_hklout(hklout)
-  pointless.set_allow_out_of_sequence_files(allow=True)
-  pointless.decide_pointgroup()
-  possible = pointless.get_possible_lattices()
-  pointgroup = pointless.get_pointgroup()
-  reindex_op =  pointless.get_reindex_operator()
-  probably_twinned = pointless.get_probably_twinned()
+    experiments = self._data_manager.experiments
+    reflections = self._data_manager.reflections
 
-  space_group = sgtbx.space_group_info(symbol=str(pointgroup)).group()
-  cb_op = sgtbx.change_of_basis_op(reindex_op)
-  return space_group, cb_op
+    # export reflections
+    self._integrated_combined_mtz = self._data_manager.export_mtz(
+      filename='integrated_combined.mtz')
 
-def scale(hklin, hklout):
-  from xia2.Wrappers.CCP4.Aimless import Aimless
-  from xia2.lib.bits import auto_logfiler
-  from xia2.Handlers.Phil import PhilIndex
-  PhilIndex.params.xia2.settings.multiprocessing.nproc = 1
-  PhilIndex.params.ccp4.aimless.secondary.lmax = 0
-  aimless = Aimless()
-  auto_logfiler(aimless)
-  aimless.set_surface_link(False) # multi-crystal
-  aimless.set_hklin(hklin)
-  aimless.set_hklout(hklout)
-  aimless.set_surface_tie(PhilIndex.params.ccp4.aimless.surface_tie)
-  spacing = 2
-  secondary = 'secondary'
-  lmax = PhilIndex.params.ccp4.aimless.secondary.lmax
-  aimless.set_secondary(mode=secondary, lmax=lmax)
-  aimless.set_spacing(spacing)
-  aimless.scale()
+    self.decide_space_group()
+
+    self.refine()
+
+    # re-export reflections
+    self._integrated_combined_mtz = self._data_manager.export_mtz(filename='combined.mtz')
+
+    # re-run pointless using above refined reflections
+    self.decide_space_group()
+
+    #assert self._data_manager.experiments[0].crystal.get_space_group() == pointgroup
+    #assert reindex_op.is_identity_op()
+
+    self.two_theta_refine()
+
+    self.scale()
+
+  def decide_space_group(self):
+    # decide space group
+    self._sorted_mtz = 'sorted.mtz'
+    space_group, reindex_op = self._decide_space_group_pointless(
+      self._integrated_combined_mtz, self._sorted_mtz)
+
+    # reindex to correct bravais setting
+    self._data_manager.reindex(reindex_op, space_group)
+    self._experiments_filename = 'experiments_reindexed.json'
+    self._reflections_filename = 'reflections_reindexed.pickle'
+    self._data_manager.export_experiments(self._experiments_filename)
+    self._data_manager.export_reflections(self._reflections_filename)
+
+  def refine(self):
+    # refine in correct bravais setting
+    self._experiments_filename, self._reflections_filename = self._dials_refine(
+      self._experiments_filename, self._reflections_filename)
+    self._data_manager.experiments = load.experiment_list(
+      self._experiments_filename, check_format=False)
+    self._data_manager.reflections = flex.reflection_table.from_pickle(
+      self._reflections_filename)
+
+  def two_theta_refine(self):
+    # two-theta refinement to get best estimate of unit cell
+    import xia2.Modules.Scaler.tools as tools
+    self.best_unit_cell, self.best_unit_cell_esd = self._dials_two_theta_refine(
+      self._experiments_filename, self._reflections_filename)
+    tools.patch_mtz_unit_cell(self._sorted_mtz, self.best_unit_cell)
+
+  def scale(self):
+
+    # scale data with aimless
+    self._scaled_mtz = 'scaled.mtz'
+    self._aimless_scale(self._sorted_mtz, self._scaled_mtz)
+
+  @staticmethod
+  def _decide_space_group_pointless(hklin, hklout):
+    from xia2.Wrappers.CCP4.Pointless import Pointless
+    from xia2.lib.bits import auto_logfiler
+    pointless = Pointless()
+    auto_logfiler(pointless)
+    pointless.set_hklin(hklin)
+    pointless.set_hklout(hklout)
+    pointless.set_allow_out_of_sequence_files(allow=True)
+    pointless.decide_pointgroup()
+    possible = pointless.get_possible_lattices()
+    space_group = sgtbx.space_group_info(
+      symbol=str(pointless.get_pointgroup())).group()
+    cb_op =  sgtbx.change_of_basis_op(pointless.get_reindex_operator())
+    #probably_twinned = pointless.get_probably_twinned()
+    return space_group, cb_op
+
+  @staticmethod
+  def _dials_refine(experiments_filename, reflections_filename):
+    from xia2.Wrappers.Dials.Refine import Refine
+    from xia2.lib.bits import auto_logfiler
+    refiner = Refine()
+    auto_logfiler(refiner)
+    refiner.set_experiments_filename(experiments_filename)
+    refiner.set_indexed_filename(reflections_filename)
+    refiner.run()
+    return refiner.get_refined_experiments_filename(), refiner.get_refined_filename()
+
+  @staticmethod
+  def _dials_two_theta_refine(experiments_filename, reflections_filename):
+    from xia2.Wrappers.Dials.TwoThetaRefine import TwoThetaRefine
+    from xia2.lib.bits import auto_logfiler
+    tt_refiner = TwoThetaRefine()
+    auto_logfiler(tt_refiner)
+    tt_refiner.set_experiments([experiments_filename])
+    tt_refiner.set_pickles([reflections_filename])
+    tt_refiner.run()
+    unit_cell = tt_refiner.get_unit_cell()
+    unit_cell_esd = tt_refiner.get_unit_cell_esd()
+    return unit_cell, unit_cell_esd
+
+  @staticmethod
+  def _aimless_scale(hklin, hklout):
+    from xia2.Wrappers.CCP4.Aimless import Aimless
+    from xia2.lib.bits import auto_logfiler
+    from xia2.Handlers.Phil import PhilIndex
+    PhilIndex.params.xia2.settings.multiprocessing.nproc = 1
+    PhilIndex.params.ccp4.aimless.secondary.lmax = 0
+    aimless = Aimless()
+    auto_logfiler(aimless)
+    aimless.set_surface_link(False) # multi-crystal
+    aimless.set_hklin(hklin)
+    aimless.set_hklout(hklout)
+    aimless.set_surface_tie(PhilIndex.params.ccp4.aimless.surface_tie)
+    spacing = 2
+    secondary = 'secondary'
+    lmax = PhilIndex.params.ccp4.aimless.secondary.lmax
+    aimless.set_secondary(mode=secondary, lmax=lmax)
+    aimless.set_spacing(spacing)
+    aimless.scale()
+    return aimless
+
 
 
 if __name__ == "__main__":

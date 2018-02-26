@@ -168,13 +168,14 @@ class Scale(object):
 
     self.decide_space_group()
 
-    self.refine()
+    if 0:
+      self.refine()
 
-    # re-export reflections
-    self._integrated_combined_mtz = self._data_manager.export_mtz(filename='combined.mtz')
+      # re-export reflections
+      self._integrated_combined_mtz = self._data_manager.export_mtz(filename='combined.mtz')
 
-    # re-run pointless using above refined reflections
-    self.decide_space_group()
+      # re-run pointless using above refined reflections
+      self.decide_space_group()
 
     #assert self._data_manager.experiments[0].crystal.get_space_group() == pointgroup
     #assert reindex_op.is_identity_op()

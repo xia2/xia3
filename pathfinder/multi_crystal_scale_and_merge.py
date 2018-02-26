@@ -184,6 +184,8 @@ class Scale(object):
 
     self.scale()
 
+    self.multi_crystal_analysis()
+
   def decide_space_group(self):
     # decide space group
     self._sorted_mtz = 'sorted.mtz'
@@ -217,6 +219,7 @@ class Scale(object):
 
     # scale data with aimless
     self._scaled_mtz = 'scaled.mtz'
+    self._scaled_unmerged_mtz = 'scaled_unmerged.mtz'
     self._aimless_scale(self._sorted_mtz, self._scaled_mtz)
 
   @staticmethod
@@ -281,6 +284,34 @@ class Scale(object):
     aimless.scale()
     return aimless
 
+  def multi_crystal_analysis(self):
+
+    from iotbx.reflection_file_reader import any_reflection_file
+    result = any_reflection_file(self._scaled_unmerged_mtz)
+    intensities = None
+    batches = None
+
+    for ma in result.as_miller_arrays(
+      merge_equivalents=False, crystal_symmetry=None):
+      if ma.info().labels == ['I(+)', 'SIGI(+)', 'I(-)', 'SIGI(-)']:
+        assert ma.anomalous_flag()
+        intensities = ma
+      elif ma.info().labels == ['I', 'SIGI']:
+        assert not ma.anomalous_flag()
+        intensities = ma
+      elif ma.info().labels == ['BATCH']:
+        batches = ma
+
+    assert batches is not None
+    assert intensities is not None
+
+    from dials_research.multi_crystal_analysis import multi_crystal_analysis
+    from dials_research.multi_crystal_analysis import master_phil_scope
+    params = master_phil_scope.extract()
+    mca = multi_crystal_analysis(
+      intensities, batches,
+      n_bins=params.n_bins, d_min=params.d_min,
+      id_to_batches=None)
 
 
 if __name__ == "__main__":

@@ -1,18 +1,42 @@
 #!/usr/bin/env dials.python
-from __future__ import absolute_import, division
+from __future__ import absolute_import, division, print_function
 
+from collections import OrderedDict
 import copy
+import logging
 import math
+import os
 
 import libtbx.load_env
 from libtbx.phil import parse
 from libtbx.utils import Sorry
+from iotbx.reflection_file_reader import any_reflection_file
 from cctbx import sgtbx
 from dxtbx.serialize import dump, load
+from dxtbx.model import Crystal
 
 from dials.array_family import flex
+from dials.algorithms.symmetry.cosym import analyse_datasets as cosym_analyse_datasets
+from dials.algorithms.symmetry.cosym import phil_scope as cosym_phil_scope
+
+from dials.command_line.export import phil_scope as export_phil_scope
+from dials.util import log
 from dials.util.options import OptionParser
 from dials.util.options import flatten_experiments, flatten_reflections
+from dials.util.export_mtz import export_mtz
+
+from dials_research.multi_crystal_analysis import multi_crystal_analysis
+from dials_research.multi_crystal_analysis import master_phil_scope as mca_phil_scope
+
+from xia2.lib.bits import auto_logfiler
+from xia2.Handlers.Phil import PhilIndex
+import xia2.Modules.Scaler.tools as tools
+from xia2.Wrappers.CCP4.Aimless import Aimless
+from xia2.Wrappers.CCP4.Pointless import Pointless
+from xia2.Wrappers.Dials.Refine import Refine
+from xia2.Wrappers.Dials.TwoThetaRefine import TwoThetaRefine
+
+logger = logging.getLogger('dials.multi_crystal_scale_and_merge')
 
 help_message = '''
 '''
@@ -41,13 +65,20 @@ def run():
   # Parse the command line
   params, options = parser.parse_args(show_diff_phil=True)
 
+  # Configure the logging
+  log.config(info='multi_crystal_scale_and_merge.log',
+             #debug=params.output.debug_log
+             )
+  from dials.util.version import dials_version
+  logger.info(dials_version())
+
   # Try to load the models and data
   if len(params.input.experiments) == 0:
-    print "No Experiments found in the input"
+    logger.info("No Experiments found in the input")
     parser.print_help()
     return
   if len(params.input.reflections) == 0:
-    print "No reflection data found in the input"
+    logger.info("No reflection data found in the input")
     parser.print_help()
     return
   try:
@@ -56,17 +87,25 @@ def run():
     raise Sorry("The number of input reflections files does not match the "
       "number of input experiments")
 
-  from collections import OrderedDict
   expt_filenames = OrderedDict((e.filename, e.data) for e in params.input.experiments)
   refl_filenames = OrderedDict((r.filename, r.data) for r in params.input.reflections)
 
   experiments = flatten_experiments(params.input.experiments)
   reflections = flatten_reflections(params.input.reflections)
 
-  reflections = reflections[0]
+  reflections_all = flex.reflection_table()
+  assert len(reflections) == len(experiments)
+  for i, (expt, refl) in enumerate(zip(experiments, reflections)):
+    expt.identifier = '%i' % i
+    refl['identifier'] = flex.std_string(refl.size(), expt.identifier)
+    refl['id'] = flex.int(refl.size(), i)
+    #refl.experiment_identifiers()[i] = expt.identifier
+    reflections_all.extend(refl)
+    reflections_all.experiment_identifiers()[i] = expt.identifier
 
-  scaled = Scale(experiments, reflections)
-  print
+  assert reflections_all.are_experiment_identifiers_consistent(experiments)
+
+  scaled = Scale(experiments, reflections_all)
 
 
 class DataManager(object):
@@ -87,7 +126,7 @@ class DataManager(object):
 
     for i, expt in enumerate(self._experiments):
       expt.scan.set_batch_offset(i * 10**n)
-      print expt.scan.get_batch_offset(), expt.scan.get_batch_range()
+      logger.info("%s %s" % (expt.scan.get_batch_offset(), expt.scan.get_batch_range()))
 
   @property
   def experiments(self):
@@ -105,20 +144,69 @@ class DataManager(object):
   def reflections(self, reflections):
     self._reflections = reflections
 
-  def reindex(self, cb_op, space_group=None):
-    import os
-    from dxtbx.model import Crystal
-    self._reflections['miller_index'] = cb_op.apply(self._reflections['miller_index'])
+  def reflections_as_miller_arrays(self, intensity_key='intensity.sum.value'):
+    from cctbx import crystal, miller
+    variance_key = intensity_key.replace('.value', '.variance')
+    assert intensity_key in self._reflections
+    assert variance_key in self._reflections
 
-    if space_group is None:
-      space_group = self._experiments[0].get_space_group()
-
+    miller_arrays = []
     for expt in self._experiments:
-      cryst_orig = copy.deepcopy(expt.crystal)
-      cryst_reindexed = cryst_orig.change_basis(cb_op)
-      a, b, c = cryst_reindexed.get_real_space_vectors()
-      cryst_reindexed = Crystal(a, b, c, space_group=space_group)
-      expt.crystal.update(cryst_reindexed)
+      crystal_symmetry = crystal.symmetry(
+        unit_cell=expt.crystal.get_unit_cell(),
+        space_group=expt.crystal.get_space_group())
+      sel = ((self._reflections.get_flags(self._reflections.flags.integrated_sum)
+              & (self._reflections['identifier'] == expt.identifier)))
+      assert sel.count(True) > 0
+      refl = self._reflections.select(sel)
+      data = refl[intensity_key]
+      variances = refl[variance_key]
+      # FIXME probably need to do some filtering of intensities similar to that
+      # done in export_mtz
+      miller_indices = refl['miller_index']
+      assert variances.all_gt(0)
+      sigmas = flex.sqrt(variances)
+
+      miller_set = miller.set(crystal_symmetry, miller_indices, anomalous_flag=False)
+      intensities = miller.array(miller_set, data=data, sigmas=sigmas)
+      intensities.set_observation_type_xray_intensity()
+      intensities.set_info(miller.array_info(
+        source='DIALS',
+        source_type='pickle'
+      ))
+      miller_arrays.append(intensities)
+    return miller_arrays
+
+  def reindex(self, cb_op=None, cb_ops=None, space_group=None):
+    assert [cb_op, cb_ops].count(None) == 1
+
+    #if space_group is None:
+      #space_group = self._experiments[0].crystal.get_space_group()
+
+    if cb_op is not None:
+      logger.info('Reindexing: %s' % cb_op)
+      self._reflections['miller_index'] = cb_op.apply(self._reflections['miller_index'])
+
+      for expt in self._experiments:
+        cryst_reindexed = expt.crystal.change_basis(cb_op)
+        if space_group is not None:
+          cryst_reindexed.set_space_group(space_group)
+        expt.crystal.update(cryst_reindexed)
+
+    else:
+      for cb_op, dataset_ids in cb_ops.iteritems():
+        cb_op = sgtbx.change_of_basis_op(cb_op)
+
+        for dataset_id in dataset_ids:
+          expt = self._experiments[dataset_id]
+          logger.info('Reindexing experiment %s: %s' % (expt.identifier, cb_op))
+          cryst_reindexed = expt.crystal.change_basis(cb_op)
+          if space_group is not None:
+            cryst_reindexed.set_space_group(space_group)
+          expt.crystal.update(cryst_reindexed)
+          sel = self._reflections['identifier'] == expt.identifier
+          self._reflections['miller_index'].set_selected(sel, cb_op.apply(
+            self._reflections['miller_index'].select(sel)))
 
   def export_reflections(self, filename):
     self._reflections.as_pickle(filename)
@@ -128,12 +216,10 @@ class DataManager(object):
 
   def export_mtz(self, filename=None, params=None):
     if params is None:
-      from dials.command_line.export import phil_scope as export_phil_scope
       params = export_phil_scope.extract()
     if filename is not None:
       params.mtz.hklout = filename
 
-    from dials.util.export_mtz import export_mtz
     m = export_mtz(
       self._reflections,
       self._experiments,
@@ -154,6 +240,8 @@ class DataManager(object):
 
     return params.mtz.hklout
 
+
+
 class Scale(object):
   def __init__(self, experiments, reflections):
 
@@ -166,6 +254,7 @@ class Scale(object):
     self._integrated_combined_mtz = self._data_manager.export_mtz(
       filename='integrated_combined.mtz')
 
+    self.cosym()
     self.decide_space_group()
 
     if 0:
@@ -186,6 +275,50 @@ class Scale(object):
 
     self.multi_crystal_analysis()
 
+  def cosym(self):
+    miller_arrays = self._data_manager.reflections_as_miller_arrays(
+      intensity_key='intensity.sum.value')
+
+    miller_arrays_p1 = []
+    for ma in miller_arrays:
+      cb_op_to_primitive = ma.change_of_basis_op_to_primitive_setting()
+      ma = ma.change_basis(cb_op_to_primitive)
+      space_group_info = sgtbx.space_group_info('P1')
+      ma = ma.customized_copy(space_group_info=space_group_info)
+      ma = ma.merge_equivalents().array()
+      miller_arrays_p1.append(ma)
+
+    params = cosym_phil_scope.extract()
+    params.cluster.method = 'seed'
+
+    result = cosym_analyse_datasets(miller_arrays_p1, params)
+
+    space_groups = {}
+    reindexing_ops = {}
+    for dataset_id in result.reindexing_ops.iterkeys():
+      if 0 in result.reindexing_ops[dataset_id]:
+        cb_op = result.reindexing_ops[dataset_id][0]
+        reindexing_ops.setdefault(cb_op, [])
+        reindexing_ops[cb_op].append(dataset_id)
+      if dataset_id in result.space_groups:
+        space_groups.setdefault(result.space_groups[dataset_id], [])
+        space_groups[result.space_groups[dataset_id]].append(dataset_id)
+
+    logger.info('Space groups:')
+    for sg, datasets in space_groups.iteritems():
+      logger.info(str(sg.info().reference_setting()))
+      logger.info(datasets)
+
+    logger.info('Reindexing operators:')
+    for cb_op, datasets in reindexing_ops.iteritems():
+      logger.info(cb_op)
+      logger.info(datasets)
+
+    self._data_manager.reindex(cb_ops=reindexing_ops)
+
+    return
+
+
   def decide_space_group(self):
     # decide space group
     self._sorted_mtz = 'sorted.mtz'
@@ -193,7 +326,7 @@ class Scale(object):
       self._integrated_combined_mtz, self._sorted_mtz)
 
     # reindex to correct bravais setting
-    self._data_manager.reindex(reindex_op, space_group)
+    self._data_manager.reindex(cb_op=reindex_op, space_group=space_group)
     self._experiments_filename = 'experiments_reindexed.json'
     self._reflections_filename = 'reflections_reindexed.pickle'
     self._data_manager.export_experiments(self._experiments_filename)
@@ -210,7 +343,6 @@ class Scale(object):
 
   def two_theta_refine(self):
     # two-theta refinement to get best estimate of unit cell
-    import xia2.Modules.Scaler.tools as tools
     self.best_unit_cell, self.best_unit_cell_esd = self._dials_two_theta_refine(
       self._experiments_filename, self._reflections_filename)
     tools.patch_mtz_unit_cell(self._sorted_mtz, self.best_unit_cell)
@@ -224,8 +356,6 @@ class Scale(object):
 
   @staticmethod
   def _decide_space_group_pointless(hklin, hklout):
-    from xia2.Wrappers.CCP4.Pointless import Pointless
-    from xia2.lib.bits import auto_logfiler
     pointless = Pointless()
     auto_logfiler(pointless)
     pointless.set_hklin(hklin)
@@ -241,8 +371,6 @@ class Scale(object):
 
   @staticmethod
   def _dials_refine(experiments_filename, reflections_filename):
-    from xia2.Wrappers.Dials.Refine import Refine
-    from xia2.lib.bits import auto_logfiler
     refiner = Refine()
     auto_logfiler(refiner)
     refiner.set_experiments_filename(experiments_filename)
@@ -252,8 +380,6 @@ class Scale(object):
 
   @staticmethod
   def _dials_two_theta_refine(experiments_filename, reflections_filename):
-    from xia2.Wrappers.Dials.TwoThetaRefine import TwoThetaRefine
-    from xia2.lib.bits import auto_logfiler
     tt_refiner = TwoThetaRefine()
     auto_logfiler(tt_refiner)
     tt_refiner.set_experiments([experiments_filename])
@@ -265,9 +391,6 @@ class Scale(object):
 
   @staticmethod
   def _aimless_scale(hklin, hklout):
-    from xia2.Wrappers.CCP4.Aimless import Aimless
-    from xia2.lib.bits import auto_logfiler
-    from xia2.Handlers.Phil import PhilIndex
     PhilIndex.params.xia2.settings.multiprocessing.nproc = 1
     PhilIndex.params.ccp4.aimless.secondary.lmax = 0
     aimless = Aimless()
@@ -286,7 +409,6 @@ class Scale(object):
 
   def multi_crystal_analysis(self):
 
-    from iotbx.reflection_file_reader import any_reflection_file
     result = any_reflection_file(self._scaled_unmerged_mtz)
     intensities = None
     batches = None
@@ -305,9 +427,7 @@ class Scale(object):
     assert batches is not None
     assert intensities is not None
 
-    from dials_research.multi_crystal_analysis import multi_crystal_analysis
-    from dials_research.multi_crystal_analysis import master_phil_scope
-    params = master_phil_scope.extract()
+    params = mca_phil_scope.extract()
     mca = multi_crystal_analysis(
       intensities, batches,
       n_bins=params.n_bins, d_min=params.d_min,

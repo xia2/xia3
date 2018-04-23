@@ -250,11 +250,12 @@ class Scale(object):
     experiments = self._data_manager.experiments
     reflections = self._data_manager.reflections
 
+    self.cosym()
+
     # export reflections
     self._integrated_combined_mtz = self._data_manager.export_mtz(
       filename='integrated_combined.mtz')
 
-    self.cosym()
     self.decide_space_group()
 
     if 0:

@@ -11,9 +11,10 @@ import libtbx.load_env
 from libtbx.phil import parse
 from libtbx.utils import Sorry
 from iotbx.reflection_file_reader import any_reflection_file
+from cctbx import crystal
 from cctbx import sgtbx
 from dxtbx.serialize import dump, load
-from dxtbx.model import Crystal
+from dxtbx.model import Crystal, ExperimentList
 
 from dials.array_family import flex
 from dials.algorithms.symmetry.cosym import analyse_datasets as cosym_analyse_datasets
@@ -43,6 +44,15 @@ help_message = '''
 
 # The phil scope
 phil_scope = parse('''
+unit_cell_clustering {
+  threshold = 5000
+    .type = float(value_min=0)
+    .help = 'Threshold value for the clustering'
+  log = False
+    .type = bool
+    .help = 'Display the dendrogram with a log scale'
+}
+
 ''', process_includes=True)
 
 def run():
@@ -105,7 +115,7 @@ def run():
 
   assert reflections_all.are_experiment_identifiers_consistent(experiments)
 
-  scaled = Scale(experiments, reflections_all)
+  scaled = Scale(experiments, reflections_all, params)
 
 
 class DataManager(object):
@@ -143,6 +153,20 @@ class DataManager(object):
   @reflections.setter
   def reflections(self, reflections):
     self._reflections = reflections
+
+  def select(self, experiment_identifiers):
+    self._experiments = ExperimentList(
+      [expt for expt in self._experiments
+       if expt.identifier in experiment_identifiers])
+    experiment_identifiers = self._experiments.identifiers()
+    sel = flex.bool(len(self._reflections), False)
+    for i_expt, identifier in enumerate(experiment_identifiers):
+      sel_expt = self._reflections['identifier'] == identifier
+      sel.set_selected(sel_expt, True)
+      self._reflections['id'].set_selected(sel_expt, i_expt)
+    self._reflections = self._reflections.select(sel)
+    assert self.reflections.are_experiment_identifiers_consistent(
+      self._experiments)
 
   def reflections_as_miller_arrays(self, intensity_key='intensity.sum.value'):
     from cctbx import crystal, miller
@@ -243,12 +267,15 @@ class DataManager(object):
 
 
 class Scale(object):
-  def __init__(self, experiments, reflections):
+  def __init__(self, experiments, reflections, params):
 
     self._data_manager = DataManager(experiments, reflections)
+    self._params = params
 
     experiments = self._data_manager.experiments
     reflections = self._data_manager.reflections
+
+    self.unit_cell_clustering(plot_name='cluster_unit_cell_p1.png')
 
     self.cosym()
 
@@ -272,9 +299,58 @@ class Scale(object):
 
     self.two_theta_refine()
 
+    self.unit_cell_clustering(plot_name='cluster_unit_cell_sg.png')
+
     self.scale()
 
     self.multi_crystal_analysis()
+
+  def unit_cell_clustering(self, plot_name=None):
+    crystal_symmetries = []
+    for expt in self._data_manager.experiments:
+      crystal_symmetry = crystal.symmetry(
+        unit_cell=expt.crystal.get_unit_cell(),
+        space_group=expt.crystal.get_space_group())
+      crystal_symmetries.append(crystal_symmetry.niggli_cell())
+    lattice_ids = [expt.identifier for expt in self._data_manager.experiments]
+    from xfel.clustering.cluster import Cluster
+    from xfel.clustering.cluster_groups import unit_cell_info
+    ucs = Cluster.from_crystal_symmetries(crystal_symmetries, lattice_ids=lattice_ids)
+    threshold = 1000
+    if plot_name is not None:
+      from matplotlib import pyplot as plt
+      plt.figure("Andrews-Bernstein distance dendogram", figsize=(12, 8))
+      ax = plt.gca()
+    else:
+      ax = None
+    clusters, _ = ucs.ab_cluster(
+      self._params.unit_cell_clustering.threshold,
+      log=self._params.unit_cell_clustering.log,
+      write_file_lists=False,
+      schnell=False,
+      doplot=(plot_name is not None),
+      ax=ax
+    )
+    if plot_name is not None:
+      plt.tight_layout()
+      plt.savefig(plot_name)
+      plt.clf()
+    logger.info(unit_cell_info(clusters))
+    largest_cluster = None
+    largest_cluster_lattice_ids = None
+    for cluster in clusters:
+      cluster_lattice_ids = [m.lattice_id for m in cluster.members]
+      if largest_cluster_lattice_ids is None:
+        largest_cluster_lattice_ids = cluster_lattice_ids
+      elif len(cluster_lattice_ids) > len(largest_cluster_lattice_ids):
+        largest_cluster_lattice_ids = cluster_lattice_ids
+
+    if len(largest_cluster_lattice_ids) < len(cluster_lattice_ids):
+      logger.info(
+        'Selecting subset of data sets for subsequent analysis: %s' %str(largest_cluster_lattice_ids))
+      self._data_manager.select(largest_cluster_lattice_ids)
+    else:
+      logger.info('Using all data sets for subsequent analysis')
 
   def cosym(self):
     miller_arrays = self._data_manager.reflections_as_miller_arrays(

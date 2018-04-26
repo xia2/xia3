@@ -27,6 +27,7 @@ from dials.util.options import flatten_experiments, flatten_reflections
 from dials.util.export_mtz import export_mtz
 
 from dials_research.multi_crystal_analysis import multi_crystal_analysis
+from dials_research.multi_crystal_analysis import separate_unmerged
 from dials_research.multi_crystal_analysis import master_phil_scope as mca_phil_scope
 
 from xia2.lib.bits import auto_logfiler
@@ -52,6 +53,10 @@ unit_cell_clustering {
     .type = bool
     .help = 'Display the dendrogram with a log scale'
 }
+
+
+identifiers = None
+  .type = strings
 
 ''', process_includes=True)
 
@@ -115,6 +120,10 @@ def run():
 
   assert reflections_all.are_experiment_identifiers_consistent(experiments)
 
+  identifiers = []
+  for identifier in params.identifiers:
+    identifiers.extend(identifier.split(','))
+  params.identifiers = identifiers
   scaled = Scale(experiments, reflections_all, params)
 
 
@@ -271,6 +280,9 @@ class Scale(object):
 
     self._data_manager = DataManager(experiments, reflections)
     self._params = params
+
+    if self._params.identifiers is not None:
+      self._data_manager.select(self._params.identifiers)
 
     experiments = self._data_manager.experiments
     reflections = self._data_manager.reflections
@@ -504,11 +516,26 @@ class Scale(object):
     assert batches is not None
     assert intensities is not None
 
+    separate = separate_unmerged(
+      intensities, batches)
+
     params = mca_phil_scope.extract()
     mca = multi_crystal_analysis(
-      intensities, batches,
-      n_bins=params.n_bins, d_min=params.d_min,
-      id_to_batches=None)
+      separate.intensities.values(),
+      labels=separate.intensities.keys(),
+    )
+
+    cos_angle_clusters = mca.cos_angle_clusters
+    expt_identifiers = self._data_manager.experiments.identifiers()
+    for cluster_id, cluster in cos_angle_clusters.iteritems():
+      dataset_ids = cluster['datasets']
+      identifiers = [expt_identifiers[i-1] for i in dataset_ids]
+      height = cluster['height']
+      print('Cluster %i:' %cluster_id)
+      print('  height: %f' %height)
+      print('  identifiers=' + ','.join(['%s' %i for i in identifiers]))
+
+    return mca
 
 
 if __name__ == "__main__":

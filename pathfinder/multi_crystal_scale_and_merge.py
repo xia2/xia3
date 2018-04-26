@@ -120,10 +120,11 @@ def run():
 
   assert reflections_all.are_experiment_identifiers_consistent(experiments)
 
-  identifiers = []
-  for identifier in params.identifiers:
-    identifiers.extend(identifier.split(','))
-  params.identifiers = identifiers
+  if params.identifiers is not None:
+    identifiers = []
+    for identifier in params.identifiers:
+      identifiers.extend(identifier.split(','))
+    params.identifiers = identifiers
   scaled = Scale(experiments, reflections_all, params)
 
 

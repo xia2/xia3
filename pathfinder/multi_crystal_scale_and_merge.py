@@ -528,13 +528,8 @@ class Scale(object):
 
     cos_angle_clusters = mca.cos_angle_clusters
     expt_identifiers = self._data_manager.experiments.identifiers()
-    for cluster_id, cluster in cos_angle_clusters.iteritems():
-      dataset_ids = cluster['datasets']
-      identifiers = [expt_identifiers[i-1] for i in dataset_ids]
-      height = cluster['height']
-      print('Cluster %i:' %cluster_id)
-      print('  height: %f' %height)
-      print('  identifiers=' + ','.join(['%s' %i for i in identifiers]))
+    for cluster in cos_angle_clusters:
+      print(cluster)
 
     return mca
 

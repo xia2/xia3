@@ -358,7 +358,7 @@ class Scale(object):
       elif len(cluster_lattice_ids) > len(largest_cluster_lattice_ids):
         largest_cluster_lattice_ids = cluster_lattice_ids
 
-    if len(largest_cluster_lattice_ids) < len(cluster_lattice_ids):
+    if len(largest_cluster_lattice_ids) < len(crystal_symmetries):
       logger.info(
         'Selecting subset of data sets for subsequent analysis: %s' %str(largest_cluster_lattice_ids))
       self._data_manager.select(largest_cluster_lattice_ids)
@@ -526,9 +526,12 @@ class Scale(object):
       labels=separate.intensities.keys(),
     )
 
-    cos_angle_clusters = mca.cos_angle_clusters
-    expt_identifiers = self._data_manager.experiments.identifiers()
-    for cluster in cos_angle_clusters:
+    print('\nIntensity correlation clustering summary:')
+    for cluster in mca.cc_clusters:
+      print(cluster)
+
+    print('\nCos angle clustering summary:')
+    for cluster in mca.cos_angle_clusters:
       print(cluster)
 
     return mca

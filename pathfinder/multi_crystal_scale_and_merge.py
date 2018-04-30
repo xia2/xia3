@@ -520,12 +520,10 @@ class Scale(object):
   def scale(self, d_min=None):
 
     # scale data with aimless
-    self._scaled_mtz = 'scaled.mtz'
-    self._scaled_unmerged_mtz = 'scaled_unmerged.mtz'
-    self._aimless_scale(self._sorted_mtz,
-                        self._scaled_mtz,
-                        self._params.scaling,
-                        d_min=d_min)
+    aimless = self._aimless_scale(
+      self._sorted_mtz, self._params.scaling, d_min=d_min)
+    self._scaled_mtz = aimless.get_hklout()
+    self._scaled_unmerged_mtz = aimless.get_unmerged_reflection_file()
 
   @staticmethod
   def _decide_space_group_pointless(hklin, hklout):
@@ -563,10 +561,11 @@ class Scale(object):
     return unit_cell, unit_cell_esd
 
   @staticmethod
-  def _aimless_scale(hklin, hklout, params, d_min=None):
+  def _aimless_scale(hklin, params, d_min=None):
     PhilIndex.params.xia2.settings.multiprocessing.nproc = 1
     aimless = Aimless()
     auto_logfiler(aimless)
+    hklout = '%i_scaled.mtz' % aimless.get_xpid()
     aimless.set_surface_link(False) # multi-crystal
     aimless.set_hklin(hklin)
     aimless.set_hklout(hklout)

@@ -8,8 +8,8 @@ import math
 import os
 
 import libtbx.load_env
-from libtbx.phil import parse
 from libtbx.utils import Sorry
+import iotbx.phil
 from iotbx.reflection_file_reader import any_reflection_file
 from cctbx import crystal
 from cctbx import sgtbx
@@ -18,7 +18,6 @@ from dxtbx.model import Crystal, ExperimentList
 
 from dials.array_family import flex
 from dials.algorithms.symmetry.cosym import analyse_datasets as cosym_analyse_datasets
-from dials.algorithms.symmetry.cosym import phil_scope as cosym_phil_scope
 
 from dials.command_line.export import phil_scope as export_phil_scope
 from dials.util import log
@@ -28,7 +27,6 @@ from dials.util.export_mtz import export_mtz
 
 from dials_research.multi_crystal_analysis import multi_crystal_analysis
 from dials_research.multi_crystal_analysis import separate_unmerged
-from dials_research.multi_crystal_analysis import master_phil_scope as mca_phil_scope
 
 from xia2.lib.bits import auto_logfiler
 from xia2.Handlers.Phil import PhilIndex
@@ -44,7 +42,7 @@ help_message = '''
 '''
 
 # The phil scope
-phil_scope = parse('''
+phil_scope = iotbx.phil.parse('''
 unit_cell_clustering {
   threshold = 5000
     .type = float(value_min=0)
@@ -54,11 +52,74 @@ unit_cell_clustering {
     .help = 'Display the dendrogram with a log scale'
 }
 
+scaling
+  .short_caption = "aimless"
+{
+  #intensities = summation profile *combine
+    #.type = choice
+  surface_tie = 0.001
+    .type = float
+    .short_caption = "Surface tie"
+  surface_link = True
+    .type = bool
+    .short_caption = "Surface link"
+  rotation.spacing = 2
+    .type = int
+    .expert_level = 2
+    .short_caption = "Interval (in degrees) between scale factors on rotation axis"
+  brotation.spacing = None
+    .type = int
+    .expert_level = 2
+    .short_caption = "Interval (in degrees) between B-factors on rotation axis"
+  secondary {
+    frame = camera *crystal
+      .type = choice
+      .help = "Whether to do the secondary beam correction in the camera spindle"
+              "frame or the crystal frame"
+    lmax = 0
+      .type = int
+      .expert_level = 2
+      .short_caption = "Aimless # secondary harmonics"
+  }
+}
+
+symmetry {
+  cosym {
+    include scope dials.algorithms.symmetry.cosym.phil_scope
+  }
+}
+
+resolution
+  .short_caption = "Resolution"
+{
+  d_max = None
+    .type = float(value_min=0.0)
+    .help = "Low resolution cutoff."
+    .short_caption = "Low resolution cutoff"
+  d_min = None
+    .type = float(value_min=0.0)
+    .help = "High resolution cutoff."
+    .short_caption = "High resolution cutoff"
+  include scope dials.util.Resolutionizer.phil_str
+}
+
+multi_crystal_analysis {
+  include scope dials_research.multi_crystal_analysis.master_phil_scope
+}
 
 identifiers = None
   .type = strings
 
 ''', process_includes=True)
+
+# override default parameters
+phil_scope = phil_scope.fetch(source=iotbx.phil.parse(
+  """\
+resolution {
+  cc_half_method = sigma_tau
+  cc_half_fit = tanh
+}
+"""))
 
 def run():
 
@@ -214,9 +275,6 @@ class DataManager(object):
   def reindex(self, cb_op=None, cb_ops=None, space_group=None):
     assert [cb_op, cb_ops].count(None) == 1
 
-    #if space_group is None:
-      #space_group = self._experiments[0].crystal.get_space_group()
-
     if cb_op is not None:
       logger.info('Reindexing: %s' % cb_op)
       self._reflections['miller_index'] = cb_op.apply(self._reflections['miller_index'])
@@ -289,7 +347,6 @@ class DataManager(object):
     return params.mtz.hklout
 
 
-
 class Scale(object):
   def __init__(self, experiments, reflections, params):
 
@@ -311,18 +368,6 @@ class Scale(object):
       filename='integrated_combined.mtz')
 
     self.decide_space_group()
-
-    if 0:
-      self.refine()
-
-      # re-export reflections
-      self._integrated_combined_mtz = self._data_manager.export_mtz(filename='combined.mtz')
-
-      # re-run pointless using above refined reflections
-      self.decide_space_group()
-
-    #assert self._data_manager.experiments[0].crystal.get_space_group() == pointgroup
-    #assert reindex_op.is_identity_op()
 
     self.two_theta_refine()
 
@@ -415,8 +460,7 @@ class Scale(object):
       ma = ma.merge_equivalents().array()
       miller_arrays_p1.append(ma)
 
-    params = cosym_phil_scope.extract()
-    params.cluster.method = 'seed'
+    params = self._params.symmetry.cosym
 
     result = cosym_analyse_datasets(miller_arrays_p1, params)
 
@@ -444,7 +488,6 @@ class Scale(object):
     self._data_manager.reindex(cb_ops=reindexing_ops)
 
     return
-
 
   def decide_space_group(self):
     # decide space group
@@ -479,7 +522,10 @@ class Scale(object):
     # scale data with aimless
     self._scaled_mtz = 'scaled.mtz'
     self._scaled_unmerged_mtz = 'scaled_unmerged.mtz'
-    self._aimless_scale(self._sorted_mtz, self._scaled_mtz, d_min=d_min)
+    self._aimless_scale(self._sorted_mtz,
+                        self._scaled_mtz,
+                        self._params.scaling,
+                        d_min=d_min)
 
   @staticmethod
   def _decide_space_group_pointless(hklin, hklout):
@@ -517,20 +563,21 @@ class Scale(object):
     return unit_cell, unit_cell_esd
 
   @staticmethod
-  def _aimless_scale(hklin, hklout, d_min=None):
+  def _aimless_scale(hklin, hklout, params, d_min=None):
     PhilIndex.params.xia2.settings.multiprocessing.nproc = 1
-    PhilIndex.params.ccp4.aimless.secondary.lmax = 0
     aimless = Aimless()
     auto_logfiler(aimless)
     aimless.set_surface_link(False) # multi-crystal
     aimless.set_hklin(hklin)
     aimless.set_hklout(hklout)
-    aimless.set_surface_tie(PhilIndex.params.ccp4.aimless.surface_tie)
-    spacing = 2
-    secondary = 'secondary'
-    lmax = PhilIndex.params.ccp4.aimless.secondary.lmax
+    aimless.set_surface_tie(params.surface_tie)
+    if params.secondary.frame == 'camera':
+      secondary = 'secondary'
+    else:
+      secondary = 'absorption'
+    lmax = params.secondary.lmax
     aimless.set_secondary(mode=secondary, lmax=lmax)
-    aimless.set_spacing(spacing)
+    aimless.set_spacing(params.rotation.spacing)
     if d_min is not None:
       aimless.set_resolution(d_min)
     aimless.scale()
@@ -539,7 +586,7 @@ class Scale(object):
   def estimate_resolution_limit(self):
     # see also xia2/Modules/Scaler/CommonScaler.py: CommonScaler._estimate_resolution_limit()
     from xia2.Wrappers.XIA.Merger import Merger
-    params = PhilIndex.params.xia2.settings.resolution
+    params = self._params.resolution
     m = Merger()
     auto_logfiler(m)
     m.set_hklin(self._scaled_unmerged_mtz)
@@ -618,7 +665,7 @@ class Scale(object):
     separate = separate_unmerged(
       intensities, batches)
 
-    params = mca_phil_scope.extract()
+    self._params.multi_crystal_analysis
     mca = multi_crystal_analysis(
       separate.intensities.values(),
       labels=separate.intensities.keys(),

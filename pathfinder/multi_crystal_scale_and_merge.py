@@ -330,6 +330,12 @@ class Scale(object):
 
     self.scale()
 
+    d_min, reason = self.estimate_resolution_limit()
+
+    logger.info('Resolution limit: %.2f (%s)' % (d_min, reason))
+
+    self.scale(d_min=d_min)
+
     self.multi_crystal_analysis()
 
   def unit_cell_clustering(self, plot_name=None):
@@ -468,12 +474,12 @@ class Scale(object):
       self._experiments_filename, self._reflections_filename)
     tools.patch_mtz_unit_cell(self._sorted_mtz, self.best_unit_cell)
 
-  def scale(self):
+  def scale(self, d_min=None):
 
     # scale data with aimless
     self._scaled_mtz = 'scaled.mtz'
     self._scaled_unmerged_mtz = 'scaled_unmerged.mtz'
-    self._aimless_scale(self._sorted_mtz, self._scaled_mtz)
+    self._aimless_scale(self._sorted_mtz, self._scaled_mtz, d_min=d_min)
 
   @staticmethod
   def _decide_space_group_pointless(hklin, hklout):
@@ -511,7 +517,7 @@ class Scale(object):
     return unit_cell, unit_cell_esd
 
   @staticmethod
-  def _aimless_scale(hklin, hklout):
+  def _aimless_scale(hklin, hklout, d_min=None):
     PhilIndex.params.xia2.settings.multiprocessing.nproc = 1
     PhilIndex.params.ccp4.aimless.secondary.lmax = 0
     aimless = Aimless()
@@ -525,8 +531,69 @@ class Scale(object):
     lmax = PhilIndex.params.ccp4.aimless.secondary.lmax
     aimless.set_secondary(mode=secondary, lmax=lmax)
     aimless.set_spacing(spacing)
+    if d_min is not None:
+      aimless.set_resolution(d_min)
     aimless.scale()
     return aimless
+
+  def estimate_resolution_limit(self):
+    # see also xia2/Modules/Scaler/CommonScaler.py: CommonScaler._estimate_resolution_limit()
+    from xia2.Wrappers.XIA.Merger import Merger
+    params = PhilIndex.params.xia2.settings.resolution
+    m = Merger()
+    auto_logfiler(m)
+    m.set_hklin(self._scaled_unmerged_mtz)
+    m.set_limit_rmerge(params.rmerge)
+    m.set_limit_completeness(params.completeness)
+    m.set_limit_cc_half(params.cc_half)
+    m.set_cc_half_significance_level(params.cc_half_significance_level)
+    m.set_limit_isigma(params.isigma)
+    m.set_limit_misigma(params.misigma)
+    #if batch_range is not None:
+      #start, end = batch_range
+      #m.set_batch_range(start, end)
+    m.run()
+
+    resolution_limits = []
+    reasoning = []
+
+    if params.completeness is not None:
+      r_comp = m.get_resolution_completeness()
+      resolution_limits.append(r_comp)
+      reasoning.append('completeness > %s' % params.completeness)
+
+    if params.cc_half is not None:
+      r_cc_half = m.get_resolution_cc_half()
+      resolution_limits.append(r_cc_half)
+      reasoning.append('cc_half > %s' % params.cc_half)
+
+    if params.rmerge is not None:
+      r_rm = m.get_resolution_rmerge()
+      resolution_limits.append(r_rm)
+      reasoning.append('rmerge > %s' % params.rmerge)
+
+    if params.isigma is not None:
+      r_uis = m.get_resolution_isigma()
+      resolution_limits.append(r_uis)
+      reasoning.append('unmerged <I/sigI> > %s' % params.isigma)
+
+    if params.misigma is not None:
+      r_mis = m.get_resolution_misigma()
+      resolution_limits.append(r_mis)
+      reasoning.append('merged <I/sigI> > %s' % params.misigma)
+
+    if len(resolution_limits):
+      resolution = max(resolution_limits)
+      reasoning = [
+          reason for limit, reason in zip(resolution_limits, reasoning)
+          if limit >= resolution
+      ]
+      reasoning = ', '.join(reasoning)
+    else:
+      resolution = 0.0
+      reasoning = None
+
+    return resolution, reasoning
 
   def multi_crystal_analysis(self):
 
@@ -557,13 +624,13 @@ class Scale(object):
       labels=separate.intensities.keys(),
     )
 
-    print('\nIntensity correlation clustering summary:')
+    logger.info('\nIntensity correlation clustering summary:')
     for cluster in mca.cc_clusters:
-      print(cluster)
+      logger.info(cluster)
 
-    print('\nCos angle clustering summary:')
+    logger.info('\nCos angle clustering summary:')
     for cluster in mca.cos_angle_clusters:
-      print(cluster)
+      logger.info(cluster)
 
     return mca
 

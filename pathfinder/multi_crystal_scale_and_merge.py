@@ -227,13 +227,14 @@ class DataManager(object):
           cryst_reindexed.set_space_group(space_group)
         expt.crystal.update(cryst_reindexed)
 
-    else:
+    elif isinstance(cb_ops, dict):
       for cb_op, dataset_ids in cb_ops.iteritems():
         cb_op = sgtbx.change_of_basis_op(cb_op)
 
         for dataset_id in dataset_ids:
           expt = self._experiments[dataset_id]
-          logger.info('Reindexing experiment %s: %s' % (expt.identifier, cb_op))
+          logger.info('Reindexing experiment %s: %s' % (
+            expt.identifier, cb_op.as_xyz()))
           cryst_reindexed = expt.crystal.change_basis(cb_op)
           if space_group is not None:
             cryst_reindexed.set_space_group(space_group)
@@ -241,6 +242,19 @@ class DataManager(object):
           sel = self._reflections['identifier'] == expt.identifier
           self._reflections['miller_index'].set_selected(sel, cb_op.apply(
             self._reflections['miller_index'].select(sel)))
+
+    else:
+      assert len(cb_ops) == len(self._experiments)
+      for cb_op, expt in zip(cb_ops, self._experiments):
+        logger.info('Reindexing experiment %s: %s' % (
+          expt.identifier, cb_op.as_xyz()))
+        cryst_reindexed = expt.crystal.change_basis(cb_op)
+        if space_group is not None:
+          cryst_reindexed.set_space_group(space_group)
+        expt.crystal.update(cryst_reindexed)
+        sel = self._reflections['identifier'] == expt.identifier
+        self._reflections['miller_index'].set_selected(sel, cb_op.apply(
+          self._reflections['miller_index'].select(sel)))
 
   def export_reflections(self, filename):
     self._reflections.as_pickle(filename)
@@ -321,9 +335,8 @@ class Scale(object):
   def unit_cell_clustering(self, plot_name=None):
     crystal_symmetries = []
     for expt in self._data_manager.experiments:
-      crystal_symmetry = crystal.symmetry(
-        unit_cell=expt.crystal.get_unit_cell(),
-        space_group=expt.crystal.get_space_group())
+      crystal_symmetry = expt.crystal.get_crystal_symmetry(
+        assert_is_compatible_unit_cell=False)
       crystal_symmetries.append(crystal_symmetry.niggli_cell())
     lattice_ids = [expt.identifier for expt in self._data_manager.experiments]
     from xfel.clustering.cluster import Cluster
@@ -366,6 +379,24 @@ class Scale(object):
       logger.info('Using all data sets for subsequent analysis')
 
   def cosym(self):
+
+    # per-dataset change of basis operator to ensure all consistent
+
+    cb_op_best_min = None
+    change_of_basis_ops = []
+    for i, expt in enumerate(self._data_manager.experiments):
+      crystal_symmetry = expt.crystal.get_crystal_symmetry()
+      metric_subgroups = sgtbx.lattice_symmetry.metric_subgroups(
+        crystal_symmetry, max_delta=5)
+      subgroup = metric_subgroups.result_groups[0]
+      cb_op_inp_best = subgroup['cb_op_inp_best']
+      crystal_symmetry_best = crystal_symmetry.change_basis(cb_op_inp_best)
+      if cb_op_best_min is None:
+        cb_op_best_min = crystal_symmetry_best.change_of_basis_op_to_niggli_cell()
+      cb_op_inp_min = cb_op_best_min * cb_op_inp_best
+      change_of_basis_ops.append(cb_op_inp_min)
+    self._data_manager.reindex(cb_ops=change_of_basis_ops)
+
     miller_arrays = self._data_manager.reflections_as_miller_arrays(
       intensity_key='intensity.sum.value')
 

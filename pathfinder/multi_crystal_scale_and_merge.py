@@ -142,9 +142,12 @@ def run():
   params, options = parser.parse_args(show_diff_phil=True)
 
   # Configure the logging
-  log.config(info='multi_crystal_scale_and_merge.log',
-             #debug=params.output.debug_log
-             )
+
+  for name in ('xia3', 'dials', 'dials_research'):
+    log.config(
+      info='multi_crystal_scale_and_merge.log',
+      #debug=params.output.debug_log
+      name=name)
   from dials.util.version import dials_version
   logger.info(dials_version())
 
@@ -461,6 +464,9 @@ class Scale(object):
       miller_arrays_p1.append(ma)
 
     params = self._params.symmetry.cosym
+    from xia2.lib import bits
+    xpid = bits._get_number()
+    params.plot_prefix = '%i_' % xpid
 
     result = cosym_analyse_datasets(miller_arrays_p1, params)
 
@@ -665,10 +671,14 @@ class Scale(object):
     separate = separate_unmerged(
       intensities, batches)
 
-    self._params.multi_crystal_analysis
+    from xia2.lib import bits
+    xpid = bits._get_number()
+    prefix = '%i_' % xpid
+
     mca = multi_crystal_analysis(
       separate.intensities.values(),
       labels=separate.intensities.keys(),
+      prefix=prefix
     )
 
     logger.info('\nIntensity correlation clustering summary:')

@@ -681,14 +681,6 @@ class Scale(object):
       prefix=prefix
     )
 
-    logger.info('\nIntensity correlation clustering summary:')
-    for cluster in mca.cc_clusters:
-      logger.info(cluster)
-
-    logger.info('\nCos angle clustering summary:')
-    for cluster in mca.cos_angle_clusters:
-      logger.info(cluster)
-
     return mca
 
 

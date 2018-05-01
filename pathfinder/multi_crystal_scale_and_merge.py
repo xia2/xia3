@@ -523,7 +523,8 @@ class Scale(object):
     aimless = self._aimless_scale(
       self._sorted_mtz, self._params.scaling, d_min=d_min)
     self._scaled_mtz = aimless.get_hklout()
-    self._scaled_unmerged_mtz = aimless.get_unmerged_reflection_file()
+    self._scaled_unmerged_mtz \
+      = os.path.splitext(self._scaled_mtz)[0] + '_unmerged.mtz'
 
   @staticmethod
   def _decide_space_group_pointless(hklin, hklout):

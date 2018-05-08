@@ -384,7 +384,10 @@ class Scale(object):
 
     self.scale(d_min=d_min)
 
-    self.multi_crystal_analysis()
+    id_to_batches = OrderedDict(
+      (expt.identifier, expt.scan.get_batch_range())
+      for expt in self._data_manager.experiments)
+    mca = self.multi_crystal_analysis(id_to_batches=id_to_batches)
 
   def unit_cell_clustering(self, plot_name=None):
     crystal_symmetries = []
@@ -648,7 +651,7 @@ class Scale(object):
 
     return resolution, reasoning
 
-  def multi_crystal_analysis(self):
+  def multi_crystal_analysis(self, id_to_batches):
 
     result = any_reflection_file(self._scaled_unmerged_mtz)
     intensities = None
@@ -669,7 +672,7 @@ class Scale(object):
     assert intensities is not None
 
     separate = separate_unmerged(
-      intensities, batches)
+      intensities, batches, id_to_batches=id_to_batches)
 
     from xia2.lib import bits
     xpid = bits._get_number()
@@ -677,7 +680,7 @@ class Scale(object):
 
     mca = multi_crystal_analysis(
       separate.intensities.values(),
-      labels=separate.intensities.keys(),
+      labels=separate.run_id_to_batch_id.values(),
       prefix=prefix
     )
 

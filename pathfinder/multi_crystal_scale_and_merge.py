@@ -173,14 +173,18 @@ def run():
   reflections = flatten_reflections(params.input.reflections)
 
   reflections_all = flex.reflection_table()
-  assert len(reflections) == len(experiments)
-  for i, (expt, refl) in enumerate(zip(experiments, reflections)):
-    expt.identifier = '%i' % i
-    refl['identifier'] = flex.std_string(refl.size(), expt.identifier)
-    refl['id'] = flex.int(refl.size(), i)
-    #refl.experiment_identifiers()[i] = expt.identifier
-    reflections_all.extend(refl)
-    reflections_all.experiment_identifiers()[i] = expt.identifier
+  assert len(reflections) == 1 or len(reflections) == len(experiments)
+  if len(reflections) > 1:
+    for i, (expt, refl) in enumerate(zip(experiments, reflections)):
+      expt.identifier = '%i' % i
+      refl['identifier'] = flex.std_string(refl.size(), expt.identifier)
+      refl['id'] = flex.int(refl.size(), i)
+      reflections_all.extend(refl)
+      reflections_all.experiment_identifiers()[i] = expt.identifier
+  else:
+    reflections_all = reflections[0]
+    assert 'identifier' in reflections_all
+    assert len(set(reflections_all['identifier'])) == len(experiments)
 
   assert reflections_all.are_experiment_identifiers_consistent(experiments)
 
@@ -452,7 +456,8 @@ class Scale(object):
         cb_op_best_min = crystal_symmetry_best.change_of_basis_op_to_niggli_cell()
       cb_op_inp_min = cb_op_best_min * cb_op_inp_best
       change_of_basis_ops.append(cb_op_inp_min)
-    self._data_manager.reindex(cb_ops=change_of_basis_ops)
+    self._data_manager.reindex(
+      cb_ops=change_of_basis_ops, space_group=sgtbx.space_group())
 
     miller_arrays = self._data_manager.reflections_as_miller_arrays(
       intensity_key='intensity.sum.value')

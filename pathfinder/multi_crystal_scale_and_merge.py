@@ -193,7 +193,7 @@ def run():
     for identifier in params.identifiers:
       identifiers.extend(identifier.split(','))
     params.identifiers = identifiers
-  scaled = Scale(experiments, reflections_all, params)
+  scaled = MultiCrystalScale(experiments, reflections_all, params)
 
 
 class DataManager(object):
@@ -354,7 +354,7 @@ class DataManager(object):
     return params.mtz.hklout
 
 
-class Scale(object):
+class MultiCrystalScale(object):
   def __init__(self, experiments, reflections, params):
 
     self._data_manager = DataManager(experiments, reflections)
@@ -368,25 +368,12 @@ class Scale(object):
 
     self.unit_cell_clustering(plot_name='cluster_unit_cell_p1.png')
 
-    self.cosym()
+    if self._params.symmetry.resolve_indexing_ambiguity:
+      self.cosym()
 
-    # export reflections
-    self._integrated_combined_mtz = self._data_manager.export_mtz(
-      filename='integrated_combined.mtz')
-
-    self.decide_space_group()
-
-    self.two_theta_refine()
+    self._scaled = Scale(self._data_manager, self._params)
 
     self.unit_cell_clustering(plot_name='cluster_unit_cell_sg.png')
-
-    self.scale()
-
-    d_min, reason = self.estimate_resolution_limit()
-
-    logger.info('Resolution limit: %.2f (%s)' % (d_min, reason))
-
-    self.scale(d_min=d_min)
 
     id_to_batches = OrderedDict(
       (expt.identifier, expt.scan.get_batch_range())
@@ -503,6 +490,65 @@ class Scale(object):
 
     return
 
+  def multi_crystal_analysis(self, id_to_batches):
+
+    result = any_reflection_file(self._scaled.scaled_unmerged_mtz)
+    intensities = None
+    batches = None
+
+    for ma in result.as_miller_arrays(
+      merge_equivalents=False, crystal_symmetry=None):
+      if ma.info().labels == ['I(+)', 'SIGI(+)', 'I(-)', 'SIGI(-)']:
+        assert ma.anomalous_flag()
+        intensities = ma
+      elif ma.info().labels == ['I', 'SIGI']:
+        assert not ma.anomalous_flag()
+        intensities = ma
+      elif ma.info().labels == ['BATCH']:
+        batches = ma
+
+    assert batches is not None
+    assert intensities is not None
+
+    separate = separate_unmerged(
+      intensities, batches, id_to_batches=id_to_batches)
+
+    from xia2.lib import bits
+    xpid = bits._get_number()
+    prefix = '%i_' % xpid
+
+    mca = multi_crystal_analysis(
+      separate.intensities.values(),
+      labels=separate.run_id_to_batch_id.values(),
+      prefix=prefix
+    )
+
+    return mca
+
+
+class Scale(object):
+  def __init__(self, data_manager, params):
+    self._data_manager = data_manager
+    self._params = params
+
+    # export reflections
+    self._integrated_combined_mtz = self._data_manager.export_mtz(
+      filename='integrated_combined.mtz')
+
+    self.decide_space_group()
+
+    self.two_theta_refine()
+
+    #self.unit_cell_clustering(plot_name='cluster_unit_cell_sg.png')
+
+    self.scale()
+
+    d_min, reason = self.estimate_resolution_limit()
+
+    logger.info('Resolution limit: %.2f (%s)' % (d_min, reason))
+
+    self.scale(d_min=d_min)
+
   def decide_space_group(self):
     # decide space group
     self._sorted_mtz = 'sorted.mtz'
@@ -539,6 +585,18 @@ class Scale(object):
     self._scaled_mtz = aimless.get_hklout()
     self._scaled_unmerged_mtz \
       = os.path.splitext(self._scaled_mtz)[0] + '_unmerged.mtz'
+
+  @property
+  def scaled_mtz(self):
+    return self._scaled_mtz
+
+  @property
+  def scaled_unmerged_mtz(self):
+    return self._scaled_unmerged_mtz
+
+  @property
+  def data_manager(self):
+    return self._data_manager
 
   @staticmethod
   def _decide_space_group_pointless(hklin, hklout):
@@ -655,41 +713,6 @@ class Scale(object):
       reasoning = None
 
     return resolution, reasoning
-
-  def multi_crystal_analysis(self, id_to_batches):
-
-    result = any_reflection_file(self._scaled_unmerged_mtz)
-    intensities = None
-    batches = None
-
-    for ma in result.as_miller_arrays(
-      merge_equivalents=False, crystal_symmetry=None):
-      if ma.info().labels == ['I(+)', 'SIGI(+)', 'I(-)', 'SIGI(-)']:
-        assert ma.anomalous_flag()
-        intensities = ma
-      elif ma.info().labels == ['I', 'SIGI']:
-        assert not ma.anomalous_flag()
-        intensities = ma
-      elif ma.info().labels == ['BATCH']:
-        batches = ma
-
-    assert batches is not None
-    assert intensities is not None
-
-    separate = separate_unmerged(
-      intensities, batches, id_to_batches=id_to_batches)
-
-    from xia2.lib import bits
-    xpid = bits._get_number()
-    prefix = '%i_' % xpid
-
-    mca = multi_crystal_analysis(
-      separate.intensities.values(),
-      labels=separate.run_id_to_batch_id.values(),
-      prefix=prefix
-    )
-
-    return mca
 
 
 if __name__ == "__main__":

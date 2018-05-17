@@ -84,6 +84,8 @@ scaling
 }
 
 symmetry {
+  resolve_indexing_ambiguity = True
+    .type = bool
   cosym {
     include scope dials.algorithms.symmetry.cosym.phil_scope
   }

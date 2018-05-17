@@ -107,6 +107,11 @@ multi_crystal_analysis {
   include scope dials_research.multi_crystal_analysis.master_phil_scope
 }
 
+min_completeness = None
+  .type = float(value_min=0, value_max=1)
+min_multiplicity = None
+  .type = float(value_min=0)
+
 identifiers = None
   .type = strings
 
@@ -379,6 +384,29 @@ class MultiCrystalScale(object):
       (expt.identifier, expt.scan.get_batch_range())
       for expt in self._data_manager.experiments)
     mca = self.multi_crystal_analysis(id_to_batches=id_to_batches)
+
+    self._data_manager.export_experiments('experiments_reindexed_all.json')
+    self._data_manager.export_reflections('reflections_reindexed_all.pickle')
+
+    min_completeness = self._params.min_completeness
+    min_multiplicity = self._params.min_multiplicity
+    if min_completeness is not None or min_multiplicity is not None:
+      self._data_manager_original = self._data_manager
+      for cluster in mca.cos_angle_clusters:
+        if min_completeness is not None and cluster.completeness < min_completeness:
+          continue
+        if min_multiplicity is not None and cluster.multiplicity < min_multiplicity:
+          continue
+        if len(cluster.labels) == len(self._data_manager_original.experiments):
+          continue
+
+        logger.info('Scaling cos angle cluster %i:' % cluster.cluster_id)
+        logger.info(cluster)
+        data_manager = copy.deepcopy(self._data_manager_original)
+        data_manager.select(cluster.labels)
+        scaled = Scale(data_manager, self._params)
+
+    return
 
   def unit_cell_clustering(self, plot_name=None):
     crystal_symmetries = []

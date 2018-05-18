@@ -389,6 +389,7 @@ class MultiCrystalScale(object):
 
     self._data_manager.export_experiments('experiments_reindexed_all.json')
     self._data_manager.export_reflections('reflections_reindexed_all.pickle')
+    self.stereographic_projections('experiments_reindexed_all.json')
 
     min_completeness = self._params.min_completeness
     min_multiplicity = self._params.min_multiplicity
@@ -409,6 +410,18 @@ class MultiCrystalScale(object):
         scaled = Scale(data_manager, self._params)
 
     return
+
+  def stereographic_projections(self, experiments_filename):
+    from xia2.Wrappers.Dials.StereographicProjection import StereographicProjection
+    sp_json_files = {}
+    for hkl in ((1,0,0), (0,1,0), (0,0,1)):
+      sp = StereographicProjection()
+      auto_logfiler(sp)
+      sp.add_experiments(experiments_filename)
+      sp.set_hkl(hkl)
+      sp.run()
+      sp_json_files[hkl] = sp.get_json_filename()
+    return sp_json_files
 
   def unit_cell_clustering(self, plot_name=None):
     crystal_symmetries = []

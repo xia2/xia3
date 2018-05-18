@@ -390,6 +390,7 @@ class MultiCrystalScale(object):
     self._data_manager.export_experiments('experiments_reindexed_all.json')
     self._data_manager.export_reflections('reflections_reindexed_all.pickle')
     self.stereographic_projections('experiments_reindexed_all.json')
+    self.plot_multiplicity(self._scaled.scaled_unmerged_mtz)
 
     min_completeness = self._params.min_completeness
     min_multiplicity = self._params.min_multiplicity
@@ -411,7 +412,8 @@ class MultiCrystalScale(object):
 
     return
 
-  def stereographic_projections(self, experiments_filename):
+  @staticmethod
+  def stereographic_projections(experiments_filename):
     from xia2.Wrappers.Dials.StereographicProjection import StereographicProjection
     sp_json_files = {}
     for hkl in ((1,0,0), (0,1,0), (0,0,1)):
@@ -422,6 +424,20 @@ class MultiCrystalScale(object):
       sp.run()
       sp_json_files[hkl] = sp.get_json_filename()
     return sp_json_files
+
+  @staticmethod
+  def plot_multiplicity(unmerged_mtz):
+    from xia2.Wrappers.XIA.PlotMultiplicity import PlotMultiplicity
+    mult_json_files = {}
+    for axis in ('h', 'k', 'l'):
+      pm = PlotMultiplicity()
+      auto_logfiler(pm)
+      pm.set_mtz_filename(unmerged_mtz)
+      pm.set_slice_axis(axis)
+      pm.set_show_missing(True)
+      pm.run()
+      mult_json_files[axis] = pm.get_json_filename()
+    return mult_json_files
 
   def unit_cell_clustering(self, plot_name=None):
     crystal_symmetries = []

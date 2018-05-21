@@ -221,7 +221,7 @@ class DataManager(object):
 
     for i, expt in enumerate(self._experiments):
       expt.scan.set_batch_offset(i * 10**n)
-      logger.info("%s %s" % (expt.scan.get_batch_offset(), expt.scan.get_batch_range()))
+      logger.debug("%s %s" % (expt.scan.get_batch_offset(), expt.scan.get_batch_range()))
 
   @property
   def experiments(self):

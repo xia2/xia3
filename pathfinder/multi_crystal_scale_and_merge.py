@@ -375,6 +375,8 @@ class MultiCrystalScale(object):
 
     self.unit_cell_clustering(plot_name='cluster_unit_cell_p1.png')
 
+    self.unit_cell_histogram(plot_name='unit_cell_histogram.png')
+
     if self._params.symmetry.resolve_indexing_ambiguity:
       self.cosym()
 
@@ -484,6 +486,86 @@ class MultiCrystalScale(object):
       self._data_manager.select(largest_cluster_lattice_ids)
     else:
       logger.info('Using all data sets for subsequent analysis')
+
+  def unit_cell_histogram(self, plot_name=None):
+
+    uc_params = [flex.double() for i in range(6)]
+    for expt in self._data_manager.experiments:
+      uc = expt.crystal.get_unit_cell()
+      for i in range(6):
+        uc_params[i].append(uc.parameters()[i])
+
+    iqr_ratio = 1.5
+    outliers = flex.bool(uc_params[0].size(), False)
+    for p in uc_params:
+      from scitbx.math import five_number_summary
+      min_x, q1_x, med_x, q3_x, max_x = five_number_summary(p)
+      logger.info(
+        'Five number summary: min %.2f, q1 %.2f, med %.2f, q3 %.2f, max %.2f'
+        % (min_x, q1_x, med_x, q3_x, max_x))
+      iqr_x = q3_x - q1_x
+      if iqr_x < 1e-6:
+        continue
+      cut_x = iqr_ratio * iqr_x
+      outliers.set_selected(p > q3_x + cut_x, True)
+      outliers.set_selected(p < q1_x - cut_x, True)
+    logger.info('Identified %i unit cell outliers' % outliers.count(True))
+
+    self.plot_uc_histograms(uc_params, outliers,
+                            #self._params.steps_per_angstrom
+                            )
+
+  @staticmethod
+  def plot_uc_histograms(uc_params, outliers, steps_per_angstrom=20,
+                         plot_name='uc_histograms.png'):
+    from matplotlib import pyplot as plt
+    plt.style.use('ggplot')
+    uc_labels = ['a', 'b', 'c']
+    f, ax = plt.subplots(nrows=2, ncols=3, figsize=(12,8))
+    a, b, c = uc_params[:3]
+
+    def uc_param_hist2d(p1, p2, ax):
+      nbins = 100
+      import numpy as np
+      H, xedges, yedges = np.histogram2d(p1, p2, bins=nbins)
+      H = np.rot90(H)
+      H = np.flipud(H)
+      Hmasked = np.ma.masked_where(H==0, H)
+      ax.pcolormesh(xedges, yedges, Hmasked)
+
+    uc_param_hist2d(a, b, ax[0][0])
+    uc_param_hist2d(b, c, ax[0][1])
+    uc_param_hist2d(c, a, ax[0][2])
+
+    for i in range(3):
+      mmm = flex.min_max_mean_double(uc_params[i])
+      import math
+      steps_per_A = steps_per_angstrom
+      Amin = math.floor(mmm.min * steps_per_A)/steps_per_A
+      Amax = math.floor(mmm.max * steps_per_A)/steps_per_A
+      n_slots = int((Amax - Amin) * steps_per_A)
+      hist = flex.histogram(uc_params[i], Amin, Amax, n_slots=n_slots)
+      hist_inliers = flex.histogram(
+        uc_params[i].select(~outliers), Amin, Amax, n_slots=n_slots)
+      ax[1][i].bar(
+        hist.slot_centers(), hist.slots(), align='center',
+        width=hist.slot_width(), zorder=10, color='black', edgecolor=None,
+        linewidth=0)
+      ax[1][i].bar(
+        hist_inliers.slot_centers(), hist_inliers.slots(), align='center',
+        width=hist_inliers.slot_width(), zorder=10, color='red', edgecolor=None,
+        linewidth=0)
+
+    ax[0][0].set_ylabel('b ($\AA$)')
+    ax[0][1].set_ylabel('c ($\AA$)')
+    ax[0][2].set_ylabel('a ($\AA$)')
+    ax[1][0].set_xlabel('a ($\AA$)')
+    ax[1][1].set_xlabel('b ($\AA$)')
+    ax[1][2].set_xlabel('c ($\AA$)')
+
+    f.savefig(plot_name)
+    plt.tight_layout()
+    plt.close(f)
 
   def cosym(self):
 
